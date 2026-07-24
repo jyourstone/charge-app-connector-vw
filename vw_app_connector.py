@@ -1100,11 +1100,13 @@ class VolkswagenReader:
 
         Recent Volkswagen app versions expose the centered vehicle marker as a
         small clickable view without a label.  Prefer that actual hit target to
-        a calculated coordinate, but only when it is close to the centered pin
-        position and has no semantics of its own.
+        a calculated coordinate.  A single marker-sized candidate is trusted
+        directly because Car Locate / Find vehicle has just centered the map on
+        the vehicle; the dump may lack the map view geometry needed for a
+        reliable calculated pin position.  With several candidates (nearby POI
+        markers) only the one close to the calculated pin position is trusted.
         """
-        expected_x, expected_y = cls.vehicle_marker_label_center(root)
-        candidates: list[tuple[int, tuple[int, int]]] = []
+        candidates: list[tuple[int, int]] = []
         for node in root.iter():
             if node.attrib.get("class") != "android.view.View":
                 continue
@@ -1120,10 +1122,17 @@ class VolkswagenReader:
             width, height = right - left, bottom - top
             if not (20 <= width <= 100 and 20 <= height <= 120):
                 continue
-            distance = abs(center[0] - expected_x) + abs(center[1] - expected_y)
-            if distance <= 180:
-                candidates.append((distance, center))
-        return min(candidates, key=lambda item: item[0])[1] if candidates else None
+            candidates.append(center)
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        expected_x, expected_y = cls.vehicle_marker_label_center(root)
+        distance, center = min(
+            (abs(x - expected_x) + abs(y - expected_y), (x, y))
+            for x, y in candidates
+        )
+        return center if distance <= 180 else None
 
     @classmethod
     def vehicle_marker_tap_centers(
@@ -1144,9 +1153,21 @@ class VolkswagenReader:
 
     @classmethod
     def vehicle_marker_is_selected(cls, root: ET.Element, vehicle_name: str) -> bool:
-        return not vehicle_name or any(
-            vehicle_name.casefold() in value.casefold()
-            for value in cls.strings(root)
+        values = cls.strings(root)
+        if not vehicle_name or any(
+            vehicle_name.casefold() in value.casefold() for value in values
+        ):
+            return True
+        # The map bottom sheet can name the vehicle differently from the
+        # overview greeting.  A parked-duration line identifies the vehicle
+        # details sheet; nearby POI cards never show one.
+        return any(
+            re.search(
+                r"(?:Geparkt seit|Parked since|Parked for)\b",
+                value,
+                re.IGNORECASE,
+            )
+            for value in values
         )
 
     @classmethod
