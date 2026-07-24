@@ -2033,6 +2033,73 @@ class ParserTests(unittest.TestCase):
             ((600, 803), (600, 945)),
         )
 
+    def test_vehicle_marker_tap_centers_accept_single_marker_without_map_view(self):
+        # VW 4.2.1 dumps can expose neither a TextureView nor the legacy
+        # catNavMapFragment, so the calculated pin position degrades to the
+        # legacy phone coordinates. The sole marker-sized anonymous hit
+        # target must still be trusted in that case.
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1200,1920]"/>
+            <node class="android.view.View" clickable="true" bounds="[579,778][621,829]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_tap_centers(root),
+            ((600, 803), (540, 642), (540, 786)),
+        )
+
+    def test_vehicle_marker_tap_centers_pick_nearest_of_multiple_markers(self):
+        # With several marker-sized anonymous views (nearby POI markers),
+        # only the one closest to the calculated pin position is trusted.
+        root = ET.fromstring(
+            """<hierarchy>
+            <node class="android.view.TextureView" bounds="[0,0][1200,1891]"/>
+            <node class="android.view.View" clickable="true" bounds="[579,778][621,829]"/>
+            <node class="android.view.View" clickable="true" bounds="[779,978][821,1029]"/>
+            </hierarchy>"""
+        )
+        self.assertEqual(
+            VolkswagenReader.vehicle_marker_tap_centers(root)[0],
+            (600, 803),
+        )
+
+    def test_vehicle_marker_selection_accepts_renamed_vehicle_sheet(self):
+        # The VW 4.2.1 map sheet can name the vehicle differently from the
+        # overview greeting. A parked-duration line identifies the vehicle
+        # details sheet; POI cards never show one.
+        for parked in (
+            "Parked since 26/06/2026",
+            "Parked for 2 hours",
+            "Geparkt seit 2 Std.",
+        ):
+            with self.subTest(parked=parked):
+                root = ET.fromstring(
+                    f"""<hierarchy>
+                    <node text="ID.3 Pure"/>
+                    <node text="Example Street 1"/>
+                    <node text="{parked}"/>
+                    <node text="Route"/>
+                    </hierarchy>"""
+                )
+                self.assertTrue(
+                    VolkswagenReader.vehicle_marker_is_selected(
+                        root, "Example Vehicle"
+                    )
+                )
+
+    def test_vehicle_marker_selection_rejects_poi_card_without_parked_duration(self):
+        root = ET.fromstring(
+            """<hierarchy>
+            <node text="Public charger"/>
+            <node text="Example Street 5"/>
+            <node text="Route"/>
+            </hierarchy>"""
+        )
+        self.assertFalse(
+            VolkswagenReader.vehicle_marker_is_selected(root, "Example Vehicle")
+        )
+
     def test_vehicle_name_is_read_from_german_and_english_overview(self):
         for description in (
             "Ihr Fahrzeug: ID.7 Tourer Pro. Gerade synchronisiert.",
@@ -2938,6 +3005,74 @@ class ParserTests(unittest.TestCase):
         self.assertIn(("input", "tap", "540", "913"), calls)
         self.assertIn(("input", "tap", "540", "1074"), calls)
         self.assertIn(("input", "keyevent", "KEYCODE_BACK"), calls)
+
+    def test_location_read_selects_vw_421_marker_sheet_without_map_view(self):
+        # VW 4.2.1: no TextureView/catNavMapFragment in the centered-map
+        # dump, the marker is an anonymous clickable view, and the bottom
+        # sheet names the vehicle differently from the overview greeting.
+        start = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Your vehicle: Example Vehicle. Just synced."/>
+            <node content-desc="Navigation Tab" bounds="[10,10][110,110]"/>
+            </hierarchy>"""
+        )
+        map_root = ET.fromstring(
+            """<hierarchy>
+            <node content-desc="Find vehicle" bounds="[1116,1370][1152,1406]"/>
+            </hierarchy>"""
+        )
+        centered = ET.fromstring(
+            """<hierarchy>
+            <node class="android.widget.FrameLayout" bounds="[0,0][1200,1920]"/>
+            <node class="android.view.View" clickable="true" bounds="[579,778][621,829]"/>
+            </hierarchy>"""
+        )
+        details = ET.fromstring(
+            """<hierarchy>
+            <node text="ID.3 Pure"/>
+            <node text="Example Street 1&#10;Parked since 2 hours"
+                bounds="[55,1565][1025,1631]"/>
+            <node text="Route" bounds="[502,1987][622,2042]"/>
+            </hierarchy>"""
+        )
+        calls: list[tuple[str, ...]] = []
+
+        def shell(*args: str, **_kwargs: object) -> str:
+            calls.append(args)
+            if args[:3] == ("dumpsys", "activity", "activities"):
+                return "dat=google.navigation:q=48.114598%2C11.480513&mode=w"
+            if args[:3] == ("dumpsys", "window", "windows"):
+                return "mCurrentFocus=com.volkswagen.weconnect/.SingleActivity"
+            return ""
+
+        with TemporaryDirectory() as directory:
+            with patch.dict(
+                "os.environ",
+                {"ADB_SERIAL": "usb-serial", "DIAGNOSTICS_DIR": directory},
+                clear=False,
+            ):
+                reader = VolkswagenReader()
+                with (
+                    patch.object(reader, "launch"),
+                    patch.object(
+                        reader,
+                        "dump_ui_with_overlay_recovery",
+                        side_effect=(start, map_root, map_root),
+                    ),
+                    patch.object(
+                        reader,
+                        "dump_ui",
+                        side_effect=(centered, details, centered, details),
+                    ),
+                    patch.object(reader, "shell", side_effect=shell),
+                    patch("time.sleep"),
+                ):
+                    result = reader._read_location()
+
+        self.assertEqual(result.address, "Example Street 1")
+        self.assertEqual(result.parkedDuration, "Parked since 2 hours")
+        self.assertEqual((result.latitude, result.longitude), (48.114598, 11.480513))
+        self.assertIn(("input", "tap", "600", "803"), calls)
 
     def test_location_map_notice_is_dismissed(self):
         notice = ET.fromstring(
