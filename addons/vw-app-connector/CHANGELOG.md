@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.21
+
+- Fix Volkswagen 4.2.1 vehicle marker selection in the location read: trust
+  a single anonymous marker-sized map hit target even when the dump lacks
+  map view geometry, and recognize the opened vehicle details sheet by its
+  parked-duration line when the sheet names the vehicle differently from
+  the overview. Nearby POI cards are still rejected.
+
+## 0.1.20
+
+- Include the VW 4.2 location marker fix in the packaged add-on build.
+
+## 0.1.19
+
+- Prefer the anonymous Google Maps vehicle-marker hit target when the map
+  exposes one, with label and pin-coordinate fallbacks, when selecting the
+  vehicle on the VW 4.2 navigation map.
+
 ## 0.1.18
 
 - Support the Volkswagen navigation map's `Find vehicle` selector alongside
